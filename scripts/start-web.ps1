@@ -73,8 +73,21 @@ function Read-DotenvValue {
     return ""
 }
 
+function Stop-NgrokOnPort {
+    param([int]$LocalPort)
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name = 'ngrok.exe'" -ErrorAction SilentlyContinue
+        foreach ($p in $procs) {
+            if ($p.CommandLine -match "http\s+$LocalPort") {
+                Write-Host "  Stopping ngrok (PID $($p.ProcessId)) targeting port $LocalPort..."
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+}
+
 # 1. Cleanup prior run
-Write-Host "[1/5] Killing previous gitlab-mcp-server / ngrok processes..." -ForegroundColor Cyan
+Write-Host "[1/5] Killing previous gitlab-mcp-server / ngrok processes on port $Port..." -ForegroundColor Cyan
 if (Test-Path $statePath) {
     try {
         $prev = Get-Content $statePath -Raw | ConvertFrom-Json
@@ -83,7 +96,7 @@ if (Test-Path $statePath) {
         }
     } catch {}
 }
-Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-NgrokOnPort -LocalPort $Port
 Stop-OnPort -LocalPort $Port
 Start-Sleep -Milliseconds 800
 
