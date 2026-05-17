@@ -114,9 +114,9 @@ if (Test-Path $envPath) {
     }
 }
 
-# Resolve port: use environment variable MCP_PORT if specified and not explicitly overridden on command line
+# Resolve port: use environment variable MCP_PORT if specified in .env and not explicitly overridden on command line
 if (-not $PSBoundParameters.ContainsKey('Port')) {
-    $envPort = [System.Environment]::GetEnvironmentVariable("MCP_PORT")
+    $envPort = Read-DotenvValue -Path $envPath -Key "MCP_PORT"
     if ($envPort) {
         $Port = [int]$envPort
         Write-Host "  Using port $Port configured in .env (MCP_PORT)..." -ForegroundColor Gray
