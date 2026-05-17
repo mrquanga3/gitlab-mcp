@@ -177,6 +177,7 @@ async def _run_http_server(
         debug=False,
         routes=[
             Route("/mcp", endpoint=asgi_handler, methods=["GET", "POST", "DELETE"]),
+            Route("/gitlab-mcp", endpoint=asgi_handler, methods=["GET", "POST", "DELETE"]),
         ],
         lifespan=lifespan,
     )
