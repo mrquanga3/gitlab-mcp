@@ -63,6 +63,18 @@ class OAuthState:
         self.clients[cid] = client
         return client
 
+    def ensure_client(self, client_id: str, redirect_uri: str | None = None) -> None:
+        if not client_id:
+            return
+        if client_id not in self.clients:
+            self.clients[client_id] = {
+                "client_id": client_id,
+                "redirect_uris": [redirect_uri] if redirect_uri else ["https://claude.ai/custom-connector/oauth/callback"],
+                "issued_at": self._now(),
+            }
+        elif redirect_uri and redirect_uri not in self.clients[client_id]["redirect_uris"]:
+            self.clients[client_id]["redirect_uris"].append(redirect_uri)
+
     def check_passphrase(self, passphrase: str) -> bool:
         return hmac.compare_digest(self._passphrase, passphrase.encode())
 
@@ -239,8 +251,9 @@ def build_oauth_app(state: OAuthState) -> Starlette:
         method = qp.get("code_challenge_method", "")
         if response_type != "code":
             return None, "Only response_type=code is supported"
-        if not client_id or client_id not in state.clients:
-            return None, "Unknown client_id"
+        if not client_id:
+            return None, "Missing client_id"
+        state.ensure_client(client_id, redirect_uri)
         if redirect_uri not in state.clients[client_id]["redirect_uris"]:
             return None, "redirect_uri not registered"
         if method != "S256":
@@ -291,6 +304,9 @@ def build_oauth_app(state: OAuthState) -> Starlette:
         form = await request.form()
         grant = form.get("grant_type")
         client_id = form.get("client_id", "")
+        redirect_uri = form.get("redirect_uri", "")
+        if client_id:
+            state.ensure_client(client_id, redirect_uri)
         if not client_id or client_id not in state.clients:
             return JSONResponse({"error": "invalid_client"}, status_code=400)
         if grant == "authorization_code":
