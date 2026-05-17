@@ -5215,3 +5215,552 @@ class GitLabClient:
             raise self._convert_exception(e) from e
         except Exception as e:
             raise self._convert_exception(e) from e
+
+    def _mr_to_dict(self, mr: Any) -> dict[str, Any]:
+        """Convert a python-gitlab MergeRequest object to a dictionary."""
+        if hasattr(mr, "asdict"):
+            try:
+                res = mr.asdict()
+                if isinstance(res, dict):
+                    return res
+            except Exception:
+                pass
+        if isinstance(mr, dict):
+            return mr
+
+        # Manual extraction fallback
+        author = None
+        if hasattr(mr, "author") and mr.author:
+            author = {
+                "id": getattr(mr.author, "id", None),
+                "username": getattr(mr.author, "username", ""),
+                "name": getattr(mr.author, "name", ""),
+                "state": getattr(mr.author, "state", ""),
+                "web_url": getattr(mr.author, "web_url", ""),
+                "avatar_url": getattr(mr.author, "avatar_url", ""),
+            }
+        
+        assignees = []
+        if hasattr(mr, "assignees") and mr.assignees:
+            try:
+                for assignee in mr.assignees:
+                    assignees.append({
+                        "id": getattr(assignee, "id", None),
+                        "username": getattr(assignee, "username", ""),
+                        "name": getattr(assignee, "name", ""),
+                        "state": getattr(assignee, "state", ""),
+                        "web_url": getattr(assignee, "web_url", ""),
+                        "avatar_url": getattr(assignee, "avatar_url", ""),
+                    })
+            except TypeError:
+                pass
+
+        reviewers = []
+        if hasattr(mr, "reviewers") and mr.reviewers:
+            try:
+                for reviewer in mr.reviewers:
+                    reviewers.append({
+                        "id": getattr(reviewer, "id", None),
+                        "username": getattr(reviewer, "username", ""),
+                        "name": getattr(reviewer, "name", ""),
+                        "state": getattr(reviewer, "state", ""),
+                        "web_url": getattr(reviewer, "web_url", ""),
+                        "avatar_url": getattr(reviewer, "avatar_url", ""),
+                    })
+            except TypeError:
+                pass
+
+        milestone = None
+        if hasattr(mr, "milestone") and mr.milestone:
+            milestone = {
+                "id": getattr(mr.milestone, "id", None),
+                "iid": getattr(mr.milestone, "iid", None),
+                "title": getattr(mr.milestone, "title", ""),
+                "description": getattr(mr.milestone, "description", ""),
+                "state": getattr(mr.milestone, "state", ""),
+            }
+
+        return {
+            "id": getattr(mr, "id", None),
+            "iid": getattr(mr, "iid", None),
+            "project_id": getattr(mr, "project_id", None),
+            "title": getattr(mr, "title", ""),
+            "description": getattr(mr, "description", ""),
+            "state": getattr(mr, "state", ""),
+            "created_at": getattr(mr, "created_at", ""),
+            "updated_at": getattr(mr, "updated_at", ""),
+            "merged_by": getattr(mr, "merged_by", None),
+            "merged_at": getattr(mr, "merged_at", None),
+            "closed_by": getattr(mr, "closed_by", None),
+            "closed_at": getattr(mr, "closed_at", None),
+            "target_branch": getattr(mr, "target_branch", ""),
+            "source_branch": getattr(mr, "source_branch", ""),
+            "user_notes_count": getattr(mr, "user_notes_count", 0),
+            "upvotes": getattr(mr, "upvotes", 0),
+            "downvotes": getattr(mr, "downvotes", 0),
+            "author": author,
+            "assignees": assignees,
+            "assignee": assignees[0] if assignees else None,
+            "reviewers": reviewers,
+            "source_project_id": getattr(mr, "source_project_id", None),
+            "target_project_id": getattr(mr, "target_project_id", None),
+            "labels": getattr(mr, "labels", []),
+            "draft": getattr(mr, "draft", False),
+            "work_in_progress": getattr(mr, "work_in_progress", False),
+            "milestone": milestone,
+            "merge_when_pipeline_succeeds": getattr(mr, "merge_when_pipeline_succeeds", False),
+            "merge_status": getattr(mr, "merge_status", ""),
+            "detailed_merge_status": getattr(mr, "detailed_merge_status", ""),
+            "sha": getattr(mr, "sha", ""),
+            "merge_commit_sha": getattr(mr, "merge_commit_sha", None),
+            "squash_commit_sha": getattr(mr, "squash_commit_sha", None),
+            "web_url": getattr(mr, "web_url", ""),
+            "has_conflicts": getattr(mr, "has_conflicts", False),
+            "blocking_discussions_resolved": getattr(mr, "blocking_discussions_resolved", True),
+        }
+
+    def list_merge_requests(
+        self,
+        project_id: str | int,
+        state: str | None = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> list[dict[str, Any]]:
+        """List merge requests for a project."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            project = self._gitlab.projects.get(project_id)
+            kwargs: dict[str, Any] = {
+                "page": page,
+                "per_page": per_page,
+            }
+            if state is not None:
+                kwargs["state"] = state
+            mrs = project.mergerequests.list(**kwargs)
+            return [self._mr_to_dict(mr) for mr in mrs]
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError(f"Project with ID {project_id} not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def get_merge_request(self, project_id: str | int, mr_iid: int) -> dict[str, Any]:
+        """Get details of a specific merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+            except GitlabGetError as pe:
+                if getattr(pe, "response_code", None) == 404:
+                    raise NotFoundError(f"Project with ID {project_id} not found") from pe
+                raise
+            
+            mr = project.mergerequests.get(mr_iid)
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError(f"Merge request with IID {mr_iid} not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def create_merge_request(
+        self,
+        project_id: str | int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str | None = None,
+        assignee_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Create a new merge request."""
+        if not source_branch or not source_branch.strip():
+            raise ValueError("source_branch is required")
+        if not target_branch or not target_branch.strip():
+            raise ValueError("target_branch is required")
+        if not title or not title.strip():
+            raise ValueError("title is required")
+
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            project = self._gitlab.projects.get(project_id)
+            data: dict[str, Any] = {
+                "source_branch": source_branch.strip(),
+                "target_branch": target_branch.strip(),
+                "title": title.strip(),
+            }
+            if description is not None:
+                data["description"] = description
+            if assignee_ids is not None:
+                data["assignee_ids"] = assignee_ids
+            mr = project.mergerequests.create(data)
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError(f"Project with ID {project_id} not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def update_merge_request(
+        self,
+        project_id: str | int,
+        mr_iid: int,
+        title: str | None = None,
+        description: str | None = None,
+        labels: list[str] | None = None,
+        assignee_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            if title is not None:
+                mr.title = title
+            if description is not None:
+                mr.description = description
+            if labels is not None:
+                mr.labels = labels
+            if assignee_ids is not None:
+                mr.assignee_ids = assignee_ids
+            mr.save()
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def merge_merge_request(
+        self,
+        project_id: str | int,
+        mr_iid: int,
+        merge_commit_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Merge a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            kwargs: dict[str, Any] = {}
+            if merge_commit_message is not None:
+                kwargs["merge_commit_message"] = merge_commit_message
+            try:
+                mr.merge(**kwargs)
+            except GitlabHttpError as he:
+                # 406 is returned when branch cannot be merged (e.g. conflicts/unresolved discussions)
+                if he.response_code == 406:
+                    raise GitLabAPIError("Branch cannot be merged (406 Method Not Allowed)") from he
+                raise
+
+            mr = project.mergerequests.get(mr_iid)
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def close_merge_request(self, project_id: str | int, mr_iid: int) -> dict[str, Any]:
+        """Close a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            mr.state_event = "close"
+            mr.save()
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def reopen_merge_request(self, project_id: str | int, mr_iid: int) -> dict[str, Any]:
+        """Reopen a closed merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            mr.state_event = "reopen"
+            mr.save()
+            return self._mr_to_dict(mr)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def approve_merge_request(self, project_id: str | int, mr_iid: int) -> dict[str, Any]:
+        """Approve a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            approval_status = mr.approve()
+            if isinstance(approval_status, dict):
+                return approval_status
+            return approval_status
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def unapprove_merge_request(self, project_id: str | int, mr_iid: int) -> None:
+        """Remove approval from a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            mr.unapprove()
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def get_merge_request_changes(self, project_id: str | int, merge_request_iid: int) -> dict[str, Any]:
+        """Get changes (diff) for a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(merge_request_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Merge request not found") from ge
+                raise
+
+            changes = mr.changes()
+            if hasattr(changes, "asdict"):
+                return changes.asdict()
+            elif isinstance(changes, dict):
+                return changes
+            return dict(changes)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Merge request not found") from e
+            raise GitLabAPIError(f"Failed to get merge request changes: {e}") from e
+        except Exception as e:
+            raise GitLabAPIError(f"Failed to get merge request changes: {e}") from e
+
+    def get_merge_request_commits(self, project_id: str | int, merge_request_iid: int) -> list[dict[str, Any]]:
+        """Get commits for a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(merge_request_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Merge request not found") from ge
+                raise
+
+            commits = mr.commits()
+            result = []
+            for commit in commits:
+                if hasattr(commit, "asdict"):
+                    result.append(commit.asdict())
+                else:
+                    result.append({
+                        "id": getattr(commit, "id", ""),
+                        "short_id": getattr(commit, "short_id", ""),
+                        "title": getattr(commit, "title", ""),
+                        "author_name": getattr(commit, "author_name", ""),
+                        "author_email": getattr(commit, "author_email", ""),
+                        "created_at": getattr(commit, "created_at", ""),
+                        "message": getattr(commit, "message", ""),
+                    })
+            return result
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def get_merge_request_pipelines(self, project_id: str | int, merge_request_iid: int) -> list[dict[str, Any]]:
+        """Get pipelines for a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(merge_request_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Merge request not found") from ge
+                raise
+
+            pipelines = mr.pipelines()
+            result = []
+            for pipeline in pipelines:
+                if hasattr(pipeline, "asdict"):
+                    result.append(pipeline.asdict())
+                else:
+                    result.append({
+                        "id": getattr(pipeline, "id", None),
+                        "project_id": getattr(pipeline, "project_id", None),
+                        "status": getattr(pipeline, "status", ""),
+                        "ref": getattr(pipeline, "ref", ""),
+                        "sha": getattr(pipeline, "sha", ""),
+                        "web_url": getattr(pipeline, "web_url", ""),
+                    })
+            return result
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def add_mr_comment(self, project_id: str | int, mr_iid: int, body: str) -> Any:
+        """Add a comment to a merge request."""
+        if not body or not body.strip():
+            raise ValueError("Comment body cannot be empty")
+
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            note = mr.notes.create({"body": body})
+            return note
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e
+
+    def list_mr_comments(
+        self,
+        project_id: str | int,
+        mr_iid: int,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> list[Any]:
+        """List all comments on a merge request."""
+        self._ensure_authenticated()
+        if not self._gitlab:
+            raise AuthenticationError(ERR_NOT_AUTHENTICATED)
+        try:
+            try:
+                project = self._gitlab.projects.get(project_id)
+                mr = project.mergerequests.get(mr_iid)
+            except GitlabGetError as ge:
+                if getattr(ge, "response_code", None) == 404:
+                    raise NotFoundError("Project or merge request not found") from ge
+                raise
+
+            notes = mr.notes.list(page=page, per_page=per_page)
+            return list(notes)
+        except NotFoundError:
+            raise
+        except GitlabGetError as e:
+            if getattr(e, "response_code", None) == 404:
+                raise NotFoundError("Project or merge request not found") from e
+            raise self._convert_exception(e) from e
+        except Exception as e:
+            raise self._convert_exception(e) from e

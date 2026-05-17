@@ -12713,3 +12713,131 @@ class TestErrorMessageConstants:
         for const in constants:
             assert isinstance(const, str)
             assert len(const) > 0
+
+
+class TestGitLabClientMergeRequests:
+    """Test merge request client methods."""
+
+    @patch("gitlab_mcp.client.gitlab_client.Gitlab")
+    def test_list_merge_requests(self, mock_gitlab_class):
+        """Test listing merge requests."""
+        config = GitLabConfig(
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="test-token",
+        )
+        mock_mr = Mock()
+        mock_mr.id = 1
+        mock_mr.iid = 10
+        mock_mr.title = "Test MR"
+        mock_mr.author = Mock(username="user1", name="User One")
+        
+        mock_project = Mock()
+        mock_project.mergerequests.list.return_value = [mock_mr]
+        
+        mock_gitlab_instance = Mock()
+        mock_gitlab_instance.projects.get.return_value = mock_project
+        mock_gitlab_class.return_value = mock_gitlab_instance
+
+        client = GitLabClient(config)
+        client._ensure_authenticated = Mock()
+        client._gitlab = mock_gitlab_instance
+
+        result = client.list_merge_requests(123, state="opened")
+
+        mock_project.mergerequests.list.assert_called_once_with(page=1, per_page=20, state="opened")
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        assert result[0]["iid"] == 10
+        assert result[0]["title"] == "Test MR"
+        assert result[0]["author"]["username"] == "user1"
+
+    @patch("gitlab_mcp.client.gitlab_client.Gitlab")
+    def test_get_merge_request(self, mock_gitlab_class):
+        """Test getting details of a specific merge request."""
+        config = GitLabConfig(
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="test-token",
+        )
+        mock_mr = Mock()
+        mock_mr.id = 1
+        mock_mr.iid = 10
+        mock_mr.title = "Test MR"
+        
+        mock_project = Mock()
+        mock_project.mergerequests.get.return_value = mock_mr
+        
+        mock_gitlab_instance = Mock()
+        mock_gitlab_instance.projects.get.return_value = mock_project
+        mock_gitlab_class.return_value = mock_gitlab_instance
+
+        client = GitLabClient(config)
+        client._ensure_authenticated = Mock()
+        client._gitlab = mock_gitlab_instance
+
+        result = client.get_merge_request(123, 10)
+
+        mock_project.mergerequests.get.assert_called_once_with(10)
+        assert result["id"] == 1
+        assert result["iid"] == 10
+        assert result["title"] == "Test MR"
+
+    @patch("gitlab_mcp.client.gitlab_client.Gitlab")
+    def test_create_merge_request(self, mock_gitlab_class):
+        """Test creating a merge request."""
+        config = GitLabConfig(
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="test-token",
+        )
+        mock_mr = Mock()
+        mock_mr.id = 1
+        mock_mr.iid = 10
+        
+        mock_project = Mock()
+        mock_project.mergerequests.create.return_value = mock_mr
+        
+        mock_gitlab_instance = Mock()
+        mock_gitlab_instance.projects.get.return_value = mock_project
+        mock_gitlab_class.return_value = mock_gitlab_instance
+
+        client = GitLabClient(config)
+        client._ensure_authenticated = Mock()
+        client._gitlab = mock_gitlab_instance
+
+        result = client.create_merge_request(123, "feature", "main", "New Feature", description="Desc")
+
+        mock_project.mergerequests.create.assert_called_once_with({
+            "source_branch": "feature",
+            "target_branch": "main",
+            "title": "New Feature",
+            "description": "Desc",
+        })
+        assert result["id"] == 1
+        assert result["iid"] == 10
+
+    @patch("gitlab_mcp.client.gitlab_client.Gitlab")
+    def test_approve_merge_request(self, mock_gitlab_class):
+        """Test approving a merge request."""
+        config = GitLabConfig(
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="test-token",
+        )
+        mock_mr = Mock()
+        mock_mr.id = 1
+        mock_mr.iid = 10
+        mock_mr.approvals.approve.return_value = {"approved": True}
+        
+        mock_project = Mock()
+        mock_project.mergerequests.get.return_value = mock_mr
+        
+        mock_gitlab_instance = Mock()
+        mock_gitlab_instance.projects.get.return_value = mock_project
+        mock_gitlab_class.return_value = mock_gitlab_instance
+
+        client = GitLabClient(config)
+        client._ensure_authenticated = Mock()
+        client._gitlab = mock_gitlab_instance
+
+        result = client.approve_merge_request(123, 10)
+
+        mock_mr.approvals.approve.assert_called_once()
+        assert result["approved"] is True
