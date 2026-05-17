@@ -97,7 +97,34 @@ def _build_prompt_messages(registry: PromptRegistry, name: str, arguments: dict[
     return GetPromptResult(messages=prompt_messages)
 
 
-async def _run_http_server(mcp_server: Server, host: str, port: int) -> None:
+_CANONICAL_ACCEPT = b"application/json, text/event-stream"
+
+
+def _normalize_accept_asgi(app: Any) -> Any:
+    """Force Accept to MCP's required value.
+
+    Some clients (claude.ai backend) send 'Accept: */*' and Streamable HTTP handler 406s them
+    because the streamable-http handler insists on both 'application/json' and
+    'text/event-stream'. MCP only ever responds with those, so the rewrite is
+    semantically safe.
+    """
+
+    async def middleware(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        rewritten = [(k, v) for k, v in (scope.get("headers") or []) if k.lower() != b"accept"]
+        rewritten.append((b"accept", _CANONICAL_ACCEPT))
+        scope = dict(scope)
+        scope["headers"] = rewritten
+        await app(scope, receive, send)
+
+    return middleware
+
+
+async def _run_http_server(
+    mcp_server: Server, host: str, port: int, insecure_no_auth: bool = False
+) -> None:
     """
     Run the MCP server with Streamable HTTP transport.
 
@@ -107,8 +134,10 @@ async def _run_http_server(mcp_server: Server, host: str, port: int) -> None:
         mcp_server: The configured MCP Server instance
         host: Host to bind to (e.g., "0.0.0.0" for all interfaces)
         port: Port to listen on
+        insecure_no_auth: Skip OAuth/passphrase in HTTP mode
     """
     import contextlib
+    import os
     from collections.abc import AsyncIterator
 
     import uvicorn
@@ -152,9 +181,44 @@ async def _run_http_server(mcp_server: Server, host: str, port: int) -> None:
         lifespan=lifespan,
     )
 
+    mcp_app = _normalize_accept_asgi(starlette_app)
+
+    if insecure_no_auth:
+        print(
+            "[gitlab-mcp-server] WARNING: --insecure-no-auth set; the HTTP endpoint has NO authentication.",
+            file=sys.stderr,
+        )
+        app = mcp_app
+    else:
+        passphrase = os.environ.get("MCP_PASSPHRASE", "").strip()
+        if not passphrase:
+            print(
+                "[gitlab-mcp-server] MCP_PASSPHRASE env var is required in --transport http mode "
+                "(or pass --insecure-no-auth to disable auth).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        from gitlab_mcp.oauth import (
+            OAuthState,
+            build_oauth_app,
+            compose_app,
+            oauth_bearer_asgi,
+        )
+
+        state = OAuthState(passphrase)
+        oauth_app = build_oauth_app(state)
+        protected_mcp = oauth_bearer_asgi(mcp_app, state)
+        app = compose_app(protected_mcp, oauth_app)
+        print(
+            "[gitlab-mcp-server] OAuth passphrase auth enabled. "
+            "Login form at /authorize. MCP at /mcp.",
+            file=sys.stderr,
+        )
+
     # Run with uvicorn
     config = uvicorn.Config(
-        starlette_app,
+        app,
         host=host,
         port=port,
         log_level="info",
@@ -2371,8 +2435,9 @@ def _build_tool_schema(params_schema: dict[str, Any]) -> dict[str, Any]:
 async def async_main(
     transport: Literal["stdio", "http"] = "stdio",
     host: str = "127.0.0.1",
-    port: int = 8000,
+    port: int = 8500,
     mode: Literal["full", "slim"] = "full",
+    insecure_no_auth: bool = False,
 ) -> None:
     """
     Async main entry point for the GitLab MCP Server.
@@ -2508,7 +2573,7 @@ async def async_main(
             await server.run(read_stream, write_stream, server.create_initialization_options())
     elif transport == "http":
         # Streamable HTTP transport for remote clients
-        await _run_http_server(server, host, port)
+        await _run_http_server(server, host, port, insecure_no_auth=insecure_no_auth)
 
 
 def parse_args() -> argparse.Namespace:
@@ -2543,14 +2608,19 @@ Examples:
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
-        help="Port for HTTP server (default: 8000)",
+        default=8500,
+        help="Port for HTTP server (default: 8500)",
     )
     parser.add_argument(
         "--mode",
         choices=["full", "slim"],
         default="full",
         help="Tool mode: full (87 tools) or slim (3 meta-tools for lazy loading)",
+    )
+    parser.add_argument(
+        "--insecure-no-auth",
+        action="store_true",
+        help="Skip OAuth/passphrase in http mode. ONLY for short manual tests.",
     )
 
     return parser.parse_args()
@@ -2565,6 +2635,7 @@ def main() -> None:
             host=args.host,
             port=args.port,
             mode=args.mode,
+            insecure_no_auth=args.insecure_no_auth,
         )
     )
 

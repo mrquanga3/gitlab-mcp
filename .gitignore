@@ -67,6 +67,7 @@ dmypy.json
 .env
 .env.local
 *.log
+.web-mcp-state.json
 
 # Documentation builds
 docs/_build/
