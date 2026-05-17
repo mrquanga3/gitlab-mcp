@@ -336,6 +336,37 @@ black src/ tests/
 ruff check src/ tests/
 ```
 
+### Web Transport (claude.ai) & ngrok
+
+`scripts/start-web.ps1` exposes the MCP HTTP server through an ngrok tunnel for claude.ai's Custom Connector. Auth = OAuth + `MCP_PASSPHRASE` (gated form). Stop via `scripts/stop-web.ps1`.
+
+Env vars used by the script (loaded from `.env`):
+- `MCP_PASSPHRASE` (required, unless `-Insecure`) — gates the OAuth login form
+- `MCP_PORT` (default 8500) — local port for the HTTP server
+- `GITLAB_NGROK_AUTHTOKEN` (optional) — passed to ngrok as `--authtoken`. Falls back to `NGROK_AUTHTOKEN`, then ngrok global config.
+- `GITLAB_NGROK_DOMAIN` (optional) — static domain (no `https://` prefix). Passed as `--url https://<domain>`.
+
+#### Running alongside other ngrok-based MCPs
+
+ngrok free plan = **1 static domain per account**. When this MCP runs in parallel with another (e.g. mcp-kanboard) on the same machine, both must NOT share the same ngrok account, otherwise the second agent fails with `ERR_NGROK_334` ("endpoint already online").
+
+Setup:
+1. Register a second ngrok account (separate email). It gets its own static domain like `junkman-undrafted-ninja.ngrok-free.dev`.
+2. In `.env`, set both `GITLAB_NGROK_AUTHTOKEN` (that account's token) and `GITLAB_NGROK_DOMAIN` (that account's static domain).
+3. `start-web.ps1` passes them as explicit CLI flags to ngrok (`--authtoken` + `--url https://<domain>`). CLI flags override ngrok global config — required because env-var-only setups can lose to a stale `ngrok config add-authtoken` from the other account.
+
+Script behavior:
+- `Stop-NgrokOnPort` only kills ngrok agents whose cmdline targets *this* MCP's `$Port` (matched with `\b` word boundary). Agents for other MCPs survive.
+- When `GITLAB_NGROK_DOMAIN` is set, the script skips probing `/api/tunnels` and trusts the explicit URL.
+- When it's NOT set, the script probes ports 4040–4044 (second agent's web inspector bumps to 4041, third to 4042, etc.) and filters tunnels by `config.addr` containing `:$Port` to avoid picking up the wrong agent's tunnel.
+- ngrok stdout/stderr are captured to `ngrok.log` / `ngrok-err.log` so silent failures are diagnosable.
+
+#### Things to NOT do in `scripts/*.ps1`
+
+- **Don't put non-ASCII characters in `scripts/*.ps1`.** Windows PowerShell 5.1 reads `.ps1` files without BOM as Windows-1252, not UTF-8. Em dashes (`—`), multiplication signs (`×`), curly quotes, etc. get mis-decoded and the parser breaks with cryptic "Missing expression after ','" errors on innocent comment lines. Stick to plain ASCII (`--`, `x`, straight quotes).
+- **Don't drop `--authtoken` / `--url` from the ngrok launch** when env vars are present. CLI flags are the only authoritative source — `NGROK_AUTHTOKEN` env var alone can lose to a previously-installed global config token (`ngrok config add-authtoken`), causing the wrong account to be used and `ERR_NGROK_334`.
+- **Don't widen `Stop-NgrokOnPort`'s cmdline regex** beyond `http\s+$LocalPort\b`. Removing `\b` makes port `8500` match `85000`, `85001`, etc., and could kill ngrok agents for unrelated MCPs.
+
 ### Phase Progression
 
 **Current Phase**: See `next_session_plan.md`

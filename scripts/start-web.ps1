@@ -75,12 +75,18 @@ function Read-DotenvValue {
 
 function Stop-NgrokOnPort {
     param([int]$LocalPort)
+    # Only kill ngrok agents whose command line targets EXACTLY our port.
+    # \b at the end prevents "8500" from matching "85000" or "85001" -- so
+    # ngrok agents tunneling other MCPs (different ports) are left alone.
+    $pattern = "http\s+$LocalPort\b"
     try {
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'ngrok.exe'" -ErrorAction SilentlyContinue
         foreach ($p in $procs) {
-            if ($p.CommandLine -match "http\s+$LocalPort") {
+            if ($p.CommandLine -match $pattern) {
                 Write-Host "  Stopping ngrok (PID $($p.ProcessId)) targeting port $LocalPort..."
                 Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            } else {
+                Write-Host "  Leaving ngrok (PID $($p.ProcessId)) alone -- different port." -ForegroundColor Gray
             }
         }
     } catch {}
@@ -198,29 +204,126 @@ if ($mcpProc.HasExited -or -not $listening) {
 }
 Write-Host "  MCP listening on http://127.0.0.1:$Port/mcp (PID $($mcpProc.Id))"
 
-# 4. Start ngrok
+# 4. Start ngrok (capture stdout/stderr so we can show why it died if it dies)
+# Resolve dedicated authtoken + static domain from .env so this MCP uses its
+# own ngrok account, independent of any other agent (e.g. mcp-kanboard) using
+# a different token. CLI flags --authtoken/--domain have HIGHEST precedence
+# and override ngrok's global config file -- without them ngrok may fall back
+# to the global config's token + default static domain (causing ERR_NGROK_334
+# "endpoint already online" when the other MCP owns that domain).
 Write-Host "[3/5] Starting ngrok tunnel..." -ForegroundColor Cyan
-$ngrokProc = Start-Process -FilePath "ngrok" -ArgumentList @("http", "$Port", "--log=stdout") `
-    -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 3
+$ngrokToken = [System.Environment]::GetEnvironmentVariable("GITLAB_NGROK_AUTHTOKEN")
+if (-not $ngrokToken) { $ngrokToken = [System.Environment]::GetEnvironmentVariable("NGROK_AUTHTOKEN") }
+$ngrokDomain = [System.Environment]::GetEnvironmentVariable("GITLAB_NGROK_DOMAIN")
 
-# 5. Read public URL
-Write-Host "[4/5] Reading public URL from http://127.0.0.1:4040/api/tunnels..." -ForegroundColor Cyan
+$ngrokArgs = @("http", "$Port", "--log=stdout")
+if ($ngrokToken) {
+    $ngrokArgs += @("--authtoken", $ngrokToken)
+    Write-Host "  Using --authtoken from .env (overrides ngrok global config)." -ForegroundColor Gray
+} else {
+    Write-Host "  No GITLAB_NGROK_AUTHTOKEN in .env; using ngrok global config token." -ForegroundColor Gray
+}
+if ($ngrokDomain) {
+    $ngrokArgs += @("--url", "https://$ngrokDomain")
+    Write-Host "  Using --url https://$ngrokDomain (account static domain)." -ForegroundColor Gray
+}
+
+$ngrokLog = Join-Path $repoRoot "ngrok.log"
+$ngrokErr = Join-Path $repoRoot "ngrok-err.log"
+Remove-Item $ngrokLog -ErrorAction SilentlyContinue
+Remove-Item $ngrokErr -ErrorAction SilentlyContinue
+$ngrokProc = Start-Process -FilePath "ngrok" -ArgumentList $ngrokArgs `
+    -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $ngrokLog -RedirectStandardError $ngrokErr
+Start-Sleep -Seconds 2
+
+if ($ngrokProc.HasExited) {
+    Write-Host "[!] ngrok exited immediately (exit $($ngrokProc.ExitCode))." -ForegroundColor Red
+    if (Test-Path $ngrokLog) {
+        Write-Host "--- ngrok stdout ---" -ForegroundColor Yellow
+        Get-Content $ngrokLog
+    }
+    if (Test-Path $ngrokErr) {
+        Write-Host "--- ngrok stderr ---" -ForegroundColor Yellow
+        Get-Content $ngrokErr
+    }
+    Write-Host "Common causes:" -ForegroundColor Yellow
+    Write-Host "  - Wrong authtoken for the static domain you set" -ForegroundColor Yellow
+    Write-Host "  - Another agent on same account already publishing this domain (ERR_NGROK_334)" -ForegroundColor Yellow
+    Write-Host "  - Missing authtoken entirely: ngrok config add-authtoken <TOKEN>" -ForegroundColor Yellow
+    Stop-Process -Id $mcpProc.Id -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+
+# 5. Resolve public URL
+# Fast path: when GITLAB_NGROK_DOMAIN is set, ngrok was launched with
+# --url https://<domain>, so the public URL is known up front -- no need to
+# probe the local API at all. Slow path (no explicit domain): probe each
+# ngrok agent's local API (4040, 4041, ...) and pick the tunnel whose
+# config.addr points at OUR $Port. Without this filter, another running
+# ngrok agent (e.g. for mcp-kanboard) would have its URL grabbed instead and
+# claude.ai would land on the wrong server's OAuth form.
 $publicUrl = $null
-for ($i = 0; $i -lt 12; $i++) {
-    try {
-        $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2 -ErrorAction Stop
-        $https = $tunnels.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
-        if ($https) { $publicUrl = $https.public_url; break }
-    } catch {}
-    Start-Sleep -Seconds 1
+if ($ngrokDomain) {
+    Write-Host "[4/5] Using static domain from .env: https://$ngrokDomain" -ForegroundColor Cyan
+    for ($i = 0; $i -lt 8; $i++) {
+        if ($ngrokProc.HasExited) {
+            Write-Host "[!] ngrok died after launch -- see logs above." -ForegroundColor Red
+            break
+        }
+        Start-Sleep -Seconds 1
+        try {
+            $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 1 -ErrorAction Stop
+            if ($tunnels.tunnels | Where-Object { $_.public_url -match $ngrokDomain }) {
+                $publicUrl = "https://$ngrokDomain"
+                break
+            }
+        } catch {}
+    }
+    if (-not $publicUrl -and -not $ngrokProc.HasExited) {
+        $publicUrl = "https://$ngrokDomain"
+    }
+} else {
+    Write-Host "[4/5] Reading public URL for port $Port (probing ngrok APIs 4040-4044)..." -ForegroundColor Cyan
+    $portPattern = ":$Port(`$|/)"
+    # Total budget ~24s: 12 outer attempts x (5 ports x 1s timeout) + 1s sleep
+    for ($i = 0; $i -lt 12; $i++) {
+        foreach ($apiPort in 4040..4044) {
+            try {
+                $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:$apiPort/api/tunnels" -TimeoutSec 1 -ErrorAction Stop
+                $https = $tunnels.tunnels | Where-Object {
+                    $_.proto -eq "https" -and $_.config.addr -match $portPattern
+                } | Select-Object -First 1
+                if ($https) { $publicUrl = $https.public_url; break }
+            } catch {}
+        }
+        if ($publicUrl) { break }
+        if ($ngrokProc.HasExited) {
+            Write-Host "[!] ngrok died while we were waiting for its tunnel." -ForegroundColor Red
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
 }
 if (-not $publicUrl) {
-    Write-Host "[!] Could not read ngrok URL. Authenticated? Try: ngrok config add-authtoken <TOKEN>" -ForegroundColor Red
+    Write-Host "[!] Could not find an ngrok tunnel for port $Port." -ForegroundColor Red
+    if (Test-Path $ngrokLog) {
+        Write-Host "--- ngrok stdout (last 20 lines) ---" -ForegroundColor Yellow
+        Get-Content $ngrokLog -Tail 20
+    }
+    if (Test-Path $ngrokErr) {
+        Write-Host "--- ngrok stderr (last 20 lines) ---" -ForegroundColor Yellow
+        Get-Content $ngrokErr -Tail 20
+    }
+    Write-Host "If another ngrok agent is already running (e.g. for mcp-kanboard)," -ForegroundColor Yellow
+    Write-Host "the free plan only allows one static domain per account. Set" -ForegroundColor Yellow
+    Write-Host "GITLAB_NGROK_AUTHTOKEN + GITLAB_NGROK_DOMAIN in .env to a SECOND" -ForegroundColor Yellow
+    Write-Host "ngrok account's credentials." -ForegroundColor Yellow
     Stop-Process -Id $mcpProc.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $ngrokProc.Id -Force -ErrorAction SilentlyContinue
     exit 1
 }
+if ($publicUrl.EndsWith("/")) { $publicUrl = $publicUrl.TrimEnd("/") }
 $mcpUrl = "$publicUrl/gitlab-mcp"
 
 # 6. Save state
